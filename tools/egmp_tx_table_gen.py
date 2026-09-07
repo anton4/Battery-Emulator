@@ -42,11 +42,12 @@ FROZEN_CLASSIC_IDS = {0x1CF, 0x3AA, 0x419, 0x4EB, 0x4F0, 0x39B, 0x36F, 0x37F, 0x
 SKIP_IDS = set()
 
 # Byte patches applied to the chosen payload. The BMS reports the coolant inlet
-# temperature it receives over CAN; the recorded car was warm (51 C).
-# 0x30A byte 20 (0x33) was tried first and is not it. 0x04A bytes 16-21 hold
-# 57/56/54/51/89/52, a rear motor-controller temperature set; all six are set to
-# 20 C (0x14). Remaining candidate if the BMS still shows 51 C: 0x225 byte 3.
-PAYLOAD_PATCHES = {0x04A: {16: 0x14, 17: 0x14, 18: 0x14, 19: 0x14, 20: 0x14, 21: 0x14}}
+# temperature it receives over CAN; the recorded car was warm (51 C = 0x33).
+# The reading was 127 (n/a) before the 88 frames from the log were added, so the
+# source is one of them. 0x04A bytes 16-21 (rear MCU temperatures) and 0x30A
+# byte 20 were tried and are not it; 0x225 byte 3 is the last raw-0x33 byte
+# among the added frames and is set to 20 C (0x14).
+PAYLOAD_PATCHES = {0x225: {3: 0x14}}
 
 # Frames without any checksum (bytes 0-1 are data). Replayed verbatim.
 NO_CRC_IDS = {0x306}

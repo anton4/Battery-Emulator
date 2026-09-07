@@ -140,10 +140,9 @@ TEST(KiaEGmpTableTests, TableIsWellFormed) {
     EXPECT_EQ(table_entry(id)->flags, EGMP_TX_CLASSIC) << "0x" << std::hex << id;
     EXPECT_EQ(table_entry(id)->group, EGMP_GROUP_CLASSIC_FROZEN) << "0x" << std::hex << id;
   }
-  // Coolant-inlet temperature patch (see generator): 0x04A temperatures = 20 C.
-  for (uint8_t b = 16; b <= 21; b++) {
-    EXPECT_EQ(table_entry(0x04A)->data[b], 0x14) << "byte " << b;
-  }
+  // Coolant-inlet temperature patch (see generator): 0x225 byte 3 = 20 C.
+  EXPECT_EQ(table_entry(0x225)->data[3], 0x14);
+  EXPECT_EQ(table_entry(0x04A)->data[19], 0x33);  // earlier candidate, restored
   EXPECT_EQ(table_entry(0x30A)->data[20], 0x33);  // earlier candidate, restored
 }
 
