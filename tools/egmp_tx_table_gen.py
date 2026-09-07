@@ -18,6 +18,8 @@ the checked-in analysis of the log is reproduced here:
   * CRC: CRC-16/CCITT (poly 0x1021, init 0xFFFF) over data[2..DLC-1], then the
     ID low byte, then the ID high byte, XORed with 0x6E17, stored little-endian
     in bytes 0..1. Verified on 100 % of the CAN-FD frames in the log.
+    0x27A uses the same structure with final XOR 0x3302; the per-entry crc_xor
+       field carries the constant.
   * Counter: byte 2 increments by one per transmission and wraps at 0xFF.
 """
 import collections
@@ -31,10 +33,19 @@ BMS_IDS = {0x055, 0x150, 0x1F5, 0x215, 0x21A, 0x235, 0x245, 0x25A, 0x275, 0x2FA,
            0x365, 0x3BA, 0x3F5}
 
 # Classic 8-byte frames whose payload changes and whose checksum is not the
-# E-GMP CRC-16 (gateway-forwarded chassis/body traffic). Cannot be regenerated,
-# so they are left out. 0x27A is a CAN-FD frame with a checksum this generator
-# cannot reproduce.
-SKIP_IDS = {0x1CF, 0x3AA, 0x419, 0x4EB, 0x4F0, 0x39B, 0x27A}
+# E-GMP CRC-16 (gateway-forwarded chassis/body traffic). They cannot be
+# regenerated, so one recorded frame is replayed verbatim with a frozen counter,
+# in their own group so they can be masked off.
+FROZEN_CLASSIC_IDS = {0x1CF, 0x3AA, 0x419, 0x4EB, 0x4F0, 0x39B, 0x36F, 0x37F, 0x410}
+
+# IDs to leave out entirely.
+SKIP_IDS = set()
+
+# Byte patches applied to the chosen payload. The BMS reports the coolant inlet
+# temperature it receives over CAN; the recorded car was warm (0x33 = 51 C).
+# Candidates carrying 0x33: 0x30A byte 20, 0x225 byte 3, 0x04A byte 19.
+# 0x30A byte 20 is patched to 0x14 (20 C) first; move on if the BMS still shows 51 C.
+PAYLOAD_PATCHES = {0x30A: {20: 0x14}}
 
 # Frames without any checksum (bytes 0-1 are data). Replayed verbatim.
 NO_CRC_IDS = {0x306}
@@ -59,7 +70,8 @@ GROUPS = [
     ("GROUP_200MS_C", [0x2C0, 0x3B5, 0x315, 0x355, 0x3A0]),
     ("GROUP_1S", [0x305, 0x480, 0x3F0, 0x1F1, 0x1F2, 0x1F3, 0x1F4, 0x1F6, 0x1F7, 0x1F8, 0x1F9, 0x1FB, 0x1FC, 0x1FD,
                   0x1FE, 0x201, 0x202]),
-    ("CLASSIC_GATEWAY", []),  # every remaining classic 8-byte frame
+    ("CLASSIC_GATEWAY", []),  # every remaining static classic 8-byte frame
+    ("CLASSIC_FROZEN", []),  # FROZEN_CLASSIC_IDS
 ]
 
 # Payloads proven to close contactors (Battery-Emulator commit 6204456a, bench
@@ -128,7 +140,8 @@ def main():
     for gi, (_, ids) in enumerate(GROUPS):
         for i in ids:
             group_of[i] = gi
-    classic_group = len(GROUPS) - 1
+    classic_group = len(GROUPS) - 2
+    frozen_group = len(GROUPS) - 1
 
     entries = []
     for can_id, frames in sorted(by_id.items()):
@@ -141,12 +154,21 @@ def main():
             payload = PROVEN_PAYLOADS[can_id]
         dlc = len(payload)
         crc_ok = all((d[0] | (d[1] << 8)) == egmp_crc(can_id, d) for _, d in frames)
+        crc_xor = 0x6E17
+        if not crc_ok and can_id not in NO_CRC_IDS:
+            # Same CRC structure with another final constant? (0x27A uses 0x3302.)
+            xors = {(d[0] | (d[1] << 8)) ^ egmp_crc(can_id, d) ^ 0x6E17 for _, d in frames}
+            if len(xors) == 1 and len(frames) > 3:
+                crc_xor = xors.pop()
+                crc_ok = True
         deltas = collections.Counter((b[1][2] - a[1][2]) & 0xFF for a, b in zip(frames, frames[1:]))
         total = sum(deltas.values())
         counter = (deltas[1] + deltas[2]) >= 0.9 * total and deltas[1] > 0.5 * total
         flags = 0
         if can_id in NO_CRC_IDS:
             pass
+        elif can_id in FROZEN_CLASSIC_IDS:
+            flags |= FLAG_CLASSIC
         elif crc_ok:
             flags |= FLAG_CRC16
             if counter:
@@ -157,11 +179,19 @@ def main():
                 print(f"// skipping 0x{can_id:03X}: non-generic checksum with changing payload", file=sys.stderr)
                 continue
             flags |= FLAG_CLASSIC
-        group = group_of.get(can_id, classic_group if flags & FLAG_CLASSIC else None)
+        payload = list(payload)
+        for index, value in PAYLOAD_PATCHES.get(can_id, {}).items():
+            payload[index] = value
+        payload = tuple(payload)
+        if can_id in FROZEN_CLASSIC_IDS:
+            group = frozen_group
+        else:
+            group = group_of.get(can_id, classic_group if flags & FLAG_CLASSIC else None)
         if group is None:
             # unlisted CAN-FD frame: group by period
             group = {10: 2, 20: 4, 50: 5, 100: 10, 200: 13}.get(period, 14)
-        entries.append(dict(id=can_id, dlc=dlc, period=period, flags=flags, group=group, data=payload, n=len(frames)))
+        entries.append(dict(id=can_id, dlc=dlc, period=period, flags=flags, group=group, crc_xor=crc_xor,
+                            data=payload, n=len(frames)))
 
     # Stagger: round-robin offsets inside each period class so that no
     # millisecond carries more than a handful of frames.
@@ -182,7 +212,8 @@ def main():
         out.write(f"  EGMP_GROUP_{name} = {gi},\n")
     out.write("  EGMP_GROUP_COUNT\n};\n\n")
     out.write("struct EgmpTxFrame {\n  uint16_t id;\n  uint8_t dlc;\n  uint16_t period_ms;\n  uint16_t offset_ms;\n"
-              "  uint8_t flags;\n  uint8_t group;\n  uint8_t data[32];\n};\n\n")
+              "  uint8_t flags;\n  uint8_t group;\n  uint16_t crc_xor;  // final XOR of the CRC-16 (0x6E17 for almost every ID)\n"
+              "  uint8_t data[32];\n};\n\n")
     out.write(f"static const uint16_t EGMP_TX_TABLE_SIZE = {len(entries)};\n")
     out.write("static const EgmpTxFrame EGMP_TX_TABLE[EGMP_TX_TABLE_SIZE] = {\n")
     for e in entries:
@@ -191,7 +222,7 @@ def main():
                                               (FLAG_CLASSIC, 'EGMP_TX_CLASSIC')) if e['flags'] & f) or '0'
         out.write(f"    // 0x{e['id']:03X}: {e['n']} frames in log, group {GROUPS[e['group']][0]}\n")
         out.write(f"    {{0x{e['id']:03X}, {e['dlc']}, {e['period']}, {e['offset']}, {flagnames}, "
-                  f"EGMP_GROUP_{GROUPS[e['group']][0]},\n     {{{data}}}}},\n")
+                  f"EGMP_GROUP_{GROUPS[e['group']][0]}, 0x{e['crc_xor']:04X},\n     {{{data}}}}},\n")
     out.write("};\n\n#endif\n// clang-format on\n")
     print(f"// {len(entries)} entries written", file=sys.stderr)
 

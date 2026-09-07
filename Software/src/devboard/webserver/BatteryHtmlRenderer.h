@@ -109,7 +109,8 @@ class BatteryHtmlRenderer {
   // Battery renderers can pass this to get_dtc_json_loader_html() directly,
   // or supply their own URL string for a different server/fork.
   static constexpr const char* GITHUB_RAW_BASE_URL =
-      "https://raw.githubusercontent.com/dalathegreat/Battery-Emulator/main/web_data/dtc/";
+      // FORK: anton4 feature branch so the updated kia_egmp_dtc.json is served. Revert before an upstream PR.
+      "https://raw.githubusercontent.com/anton4/Battery-Emulator/feature/egmp_checksum_counter/web_data/dtc/";
   // Renders a status line + optional file-picker widget + JavaScript that fills
   // DTC descriptions into any table cell carrying a data-dtc-code attribute.
   // The attribute may hold either the decimal code (matched against the JSON

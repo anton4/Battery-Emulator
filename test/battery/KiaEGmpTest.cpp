@@ -18,6 +18,7 @@ namespace {
 struct LoggedFrame {
   uint16_t id;
   std::vector<uint8_t> data;
+  uint16_t crc_xor = 0x6E17;
 };
 
 // Frames copied verbatim from real E-GMP battery-bus recordings (EV6 GT M-CAN
@@ -46,6 +47,11 @@ const LoggedFrame kLoggedFrames[] = {
     // 100 ms / 200 ms VCU-side frames (0x2B5 bench capture, 0x308 EV6 GT log)
     {0x2B5, {0xBD, 0xB2, 0x42, 0x00, 0x00, 0x00, 0x00, 0x80, 0x59, 0x00, 0x2B, 0x00, 0x00, 0x04, 0x00, 0x00,
              0xFA, 0xD0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x8F, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}},
+    // 0x27A: same CRC structure, different final constant (EV6 GT log)
+    {0x27A,
+     {0x21, 0x31, 0x0A, 0x0F, 0x00, 0x00, 0x00, 0xFE, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x2C, 0x01,
+      0x99, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+     0x3302},
     {0x308, {0xA5, 0x80, 0x85, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
              0xFF, 0x71, 0x6E, 0x86, 0x0D, 0xFB, 0x8F, 0x03, 0x37, 0xC3, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00}},
 };
@@ -97,14 +103,14 @@ std::map<uint16_t, std::vector<CAN_frame>> frames_by_id() {
 TEST(KiaEGmpChecksumTests, ReproducesChecksumsOfRecordedFrames) {
   for (const auto& logged : kLoggedFrames) {
     uint16_t stored = logged.data[0] | (logged.data[1] << 8);
-    uint16_t calculated = KiaEGmpBattery::calculate_transmit_checksum(logged.id, logged.data.data(),
-                                                                      static_cast<uint8_t>(logged.data.size()));
+    uint16_t calculated = KiaEGmpBattery::calculate_transmit_checksum(
+        logged.id, logged.data.data(), static_cast<uint8_t>(logged.data.size()), logged.crc_xor);
     EXPECT_EQ(calculated, stored) << "ID 0x" << std::hex << logged.id;
   }
 }
 
 TEST(KiaEGmpTableTests, TableIsWellFormed) {
-  ASSERT_GT(EGMP_TX_TABLE_SIZE, 90);
+  ASSERT_GT(EGMP_TX_TABLE_SIZE, 110);
   for (uint16_t i = 0; i < EGMP_TX_TABLE_SIZE; i++) {
     const auto& e = EGMP_TX_TABLE[i];
     EXPECT_GE(e.dlc, 8) << "0x" << std::hex << e.id;
@@ -125,6 +131,17 @@ TEST(KiaEGmpTableTests, TableIsWellFormed) {
   }
   // 0x306 carries live data without checksum and must be replayed untouched.
   EXPECT_EQ(table_entry(0x306)->flags, 0);
+  // 0x27A has the odd CRC constant; the frozen classic frames are replayed as-is.
+  ASSERT_NE(table_entry(0x27A), nullptr);
+  EXPECT_EQ(table_entry(0x27A)->crc_xor, 0x3302);
+  EXPECT_EQ(table_entry(0x27A)->flags, EGMP_TX_CRC16 | EGMP_TX_COUNTER);
+  for (uint16_t id : {0x1CF, 0x3AA, 0x419, 0x4EB, 0x4F0, 0x39B, 0x36F, 0x37F, 0x410}) {
+    ASSERT_NE(table_entry(id), nullptr) << "0x" << std::hex << id;
+    EXPECT_EQ(table_entry(id)->flags, EGMP_TX_CLASSIC) << "0x" << std::hex << id;
+    EXPECT_EQ(table_entry(id)->group, EGMP_GROUP_CLASSIC_FROZEN) << "0x" << std::hex << id;
+  }
+  // Coolant-inlet temperature patch (see generator): 0x30A byte 20 = 20 C.
+  EXPECT_EQ(table_entry(0x30A)->data[20], 0x14);
 }
 
 TEST(KiaEGmpEmulationTests, SendsNothingUntilBmsIsSeen) {
@@ -172,7 +189,7 @@ TEST(KiaEGmpEmulationTests, ChecksumsAndCountersAreValidOnTheWire) {
       const auto& f = frames[n];
       if (e->flags & EGMP_TX_CRC16) {
         uint16_t stored = f.data.u8[0] | (f.data.u8[1] << 8);
-        EXPECT_EQ(stored, KiaEGmpBattery::calculate_transmit_checksum(f.ID, f.data.u8, f.DLC))
+        EXPECT_EQ(stored, KiaEGmpBattery::calculate_transmit_checksum(f.ID, f.data.u8, f.DLC, e->crc_xor))
             << "0x" << std::hex << f.ID;
       } else {
         // No checksum: bytes 0-1 are payload and must be replayed verbatim.

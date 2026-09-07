@@ -25,9 +25,11 @@ class KiaEGmpBattery : public UdsCanBattery {
 
   /* E-GMP CAN-FD frame checksum, stored little-endian in bytes 0-1 of every
    * frame: CRC-16/CCITT (poly 0x1021, init 0xFFFF) over data[2..dlc-1], then
-   * the CAN ID low byte, then the CAN ID high byte, XOR 0x6E17. Verified
-   * against every CAN-FD frame in a 22 s recording of an EV6 GT battery bus. */
-  static uint16_t calculate_transmit_checksum(uint16_t can_id, const uint8_t* data, uint8_t dlc);
+   * the CAN ID low byte, then the CAN ID high byte, XOR 0x6E17 (0x3302 for
+   * 0x27A, see the table). Verified against every CAN-FD frame in a 22 s
+   * recording of an EV6 GT battery bus. */
+  static uint16_t calculate_transmit_checksum(uint16_t can_id, const uint8_t* data, uint8_t dlc,
+                                              uint16_t final_xor = 0x6E17);
 
   /* Bus emulation: bit per EgmpTxGroup (see KIA-E-GMP-TX-TABLE.h). All groups
    * are on by default. Clear bits and rebuild to find out which ECU groups the

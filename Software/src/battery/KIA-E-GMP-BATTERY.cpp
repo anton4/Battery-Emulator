@@ -118,7 +118,8 @@ uint8_t KiaEGmpBattery::calculateCRC(CAN_frame rx_frame, uint8_t length, uint8_t
   return crc;
 }
 
-uint16_t KiaEGmpBattery::calculate_transmit_checksum(uint16_t can_id, const uint8_t* data, uint8_t dlc) {
+uint16_t KiaEGmpBattery::calculate_transmit_checksum(uint16_t can_id, const uint8_t* data, uint8_t dlc,
+                                                     uint16_t final_xor) {
   uint16_t crc = 0xFFFF;
   auto feed = [&crc](uint8_t value) {
     crc ^= static_cast<uint16_t>(value) << 8;
@@ -131,7 +132,7 @@ uint16_t KiaEGmpBattery::calculate_transmit_checksum(uint16_t can_id, const uint
   }
   feed(static_cast<uint8_t>(can_id & 0xFF));
   feed(static_cast<uint8_t>(can_id >> 8));
-  return crc ^ 0x6E17;
+  return crc ^ final_xor;
 }
 
 void KiaEGmpBattery::suppress_emulated_id(uint16_t can_id) {
@@ -180,7 +181,7 @@ void KiaEGmpBattery::transmit_bus_emulation(unsigned long currentMillis) {
       frame.data.u8[2] = state.counter++;
     }
     if (tmpl.flags & EGMP_TX_CRC16) {
-      uint16_t checksum = calculate_transmit_checksum(tmpl.id, frame.data.u8, tmpl.dlc);
+      uint16_t checksum = calculate_transmit_checksum(tmpl.id, frame.data.u8, tmpl.dlc, tmpl.crc_xor);
       frame.data.u8[0] = static_cast<uint8_t>(checksum);
       frame.data.u8[1] = static_cast<uint8_t>(checksum >> 8);
     }
