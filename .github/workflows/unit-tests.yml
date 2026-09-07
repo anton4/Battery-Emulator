@@ -3,8 +3,9 @@ name: ⚙️ Run Unit Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**', 'bugfix/**']
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
