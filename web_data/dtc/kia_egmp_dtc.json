@@ -1,46 +1,62 @@
 [
   {
     "dtc": "P00B112",
-    "l_dsc": "Unknown"
+    "l_dsc": "Radiator Coolant Temperature Sensor Circuit",
+    "s_dsc": "Short to Battery / Open"
   },
   {
     "dtc": "P0A0A12",
-    "l_dsc": "High Voltage System Interlock Circuit"
+    "l_dsc": "High Voltage System Interlock Circuit (HVIL)",
+    "s_dsc": "Short to Battery / Open Loop"
   },
   {
     "dtc": "P0AA600",
-    "l_dsc": "Hybrid Battery Voltage System Isolation Fault"
+    "l_dsc": "Hybrid/EV Battery Voltage System Isolation Fault",
+    "s_dsc": "High Voltage Insulation Breakdown"
   },
   {
     "dtc": "P0C4212",
-    "l_dsc": "Hybrid Battery Pack Coolant Temperature Sensor Circuit"
+    "l_dsc": "Hybrid/EV Battery Pack Coolant Temperature Sensor Circuit",
+    "s_dsc": "Coolant Temp Sensor Out of Range"
   },
   {
     "dtc": "P1A9096",
-    "l_dsc": "DC/DC Converter Input Voltage Sensor Fault."
+    "l_dsc": "DC/DC Converter Input Voltage Sensor Fault",
+    "s_dsc": "LDC Input Voltage Sensor Out of Range"
   },
   {
     "dtc": "P1B8000",
-    "l_dsc": "Hybrid/Electric Vehicle Battery 52 Circuit High Voltage"
+    "l_dsc": "Hybrid/EV Battery Cell Circuit High Voltage",
+    "s_dsc": "Cell Overvoltage Detected"
   },
   {
     "dtc": "U029300",
-    "l_dsc": "Lost Communication With Hybrid Powertrain Control Module"
+    "l_dsc": "Lost Communication with Hybrid/EV Powertrain Control Module (VCU)",
+    "s_dsc": "BMS receives no VCU CAN messages"
   },
   {
     "dtc": "U111800",
-    "l_dsc": "x"
+    "l_dsc": "Lost Communication with On-Board Charger (OBC / ICCU)",
+    "s_dsc": "BMS receives no charger CAN messages"
   },
   {
     "dtc": "U111900",
-    "l_dsc": "X"
+    "l_dsc": "Lost Communication with Electric A/C Compressor",
+    "s_dsc": "BMS receives no e-compressor CAN messages"
   },
   {
     "dtc": "U112800",
-    "l_dsc": "Lost Communication with Hybrid/EV battery electronic coolant valve A"
+    "l_dsc": "Lost Communication with Hybrid/EV Battery Electronic Coolant Valve A",
+    "s_dsc": "BMS receives no coolant valve CAN messages"
   },
-    {
+  {
     "dtc": "U130E87",
-    "l_dsc": "X"
+    "l_dsc": "Lost Communication with Vehicle Charging Management System (VCMS)",
+    "s_dsc": "Missing Message (failure type 0x87)"
+  },
+  {
+    "dtc": "U141582",
+    "l_dsc": "Invalid Data Received from VCU",
+    "s_dsc": "Alive Counter Incorrect / Not Updated (failure type 0x82)"
   }
 ]

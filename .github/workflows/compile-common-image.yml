@@ -2,8 +2,9 @@ name: 🔋 Compile Common Images
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'feature/**', 'bugfix/**']
   pull_request:
+  workflow_dispatch:
   workflow_call:
     inputs:
       release_version:

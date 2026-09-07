@@ -118,124 +118,89 @@ uint8_t KiaEGmpBattery::calculateCRC(CAN_frame rx_frame, uint8_t length, uint8_t
   return crc;
 }
 
-uint16_t KiaEGmpBattery::calculate_transmit_checksum(const CAN_frame& frame) {
-  uint16_t crc = 0;
-  for (uint8_t index = 2; index < frame.DLC; index++) {
-    crc ^= static_cast<uint16_t>(frame.data.u8[index]) << 8;
-    for (uint8_t bit = 0; bit < 8; bit++) {
-      crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021) : static_cast<uint16_t>(crc << 1);
-    }
-  }
-
-  for (uint8_t value : {static_cast<uint8_t>(frame.ID), static_cast<uint8_t>(0)}) {
+uint16_t KiaEGmpBattery::calculate_transmit_checksum(uint16_t can_id, const uint8_t* data, uint8_t dlc) {
+  uint16_t crc = 0xFFFF;
+  auto feed = [&crc](uint8_t value) {
     crc ^= static_cast<uint16_t>(value) << 8;
     for (uint8_t bit = 0; bit < 8; bit++) {
       crc = (crc & 0x8000) ? static_cast<uint16_t>((crc << 1) ^ 0x1021) : static_cast<uint16_t>(crc << 1);
     }
+  };
+  for (uint8_t index = 2; index < dlc; index++) {
+    feed(data[index]);
   }
-
-  return crc ^ transmit_checksum_xor(frame.ID);
+  feed(static_cast<uint8_t>(can_id & 0xFF));
+  feed(static_cast<uint8_t>(can_id >> 8));
+  return crc ^ 0x6E17;
 }
 
-uint16_t KiaEGmpBattery::transmit_checksum_xor(uint16_t can_id) const {
-  switch (can_id) {
-    case 0x10A:
-    case 0x120:
-    case 0x19A:
-      return 0x8F7A;
-    case 0x2B5:
-    case 0x2C0:
-    case 0x2D5:
-    case 0x2E0:
-    case 0x2E5:
-    case 0x2EA:
-      return 0xBF19;
-    case 0x306:
-      return 0xADAC;
-    case 0x308:
-      return 0x1768;
-    case 0x30A:
-    case 0x320:
-    case 0x33A:
-    case 0x350:
-    case 0x3B5:
-      return 0xAF38;
-    default:
-      return 0x9F5B;
-  }
-}
-
-void KiaEGmpBattery::request_startup_sequence() {
-  startupSequenceRequested = true;
-  startupSequenceComplete = false;
-}
-
-void KiaEGmpBattery::transmit_startup_message(uint8_t message_index) {
-  CAN_frame frame = *messages[message_index];
-  uint16_t checksum = calculate_transmit_checksum(frame);
-  frame.data.u8[0] = static_cast<uint8_t>(checksum);
-  frame.data.u8[1] = static_cast<uint8_t>(checksum >> 8);
-  transmit_can_frame(&frame);
-}
-
-bool KiaEGmpBattery::has_transmit_counter(uint16_t can_id) const {
-  switch (can_id) {
-    case 0x10A:
-    case 0x120:
-    case 0x19A:
-    case 0x2B5:
-    case 0x2C0:
-    case 0x2D5:
-    case 0x2E0:
-    case 0x2E5:
-    case 0x2EA:
-    case 0x308:
-    case 0x30A:
-    case 0x320:
-    case 0x33A:
-    case 0x350:
-    case 0x3B5:
-      return true;
-    default:
-      return false;
-  }
-}
-
-void KiaEGmpBattery::transmit_message(uint16_t can_id, uint32_t message_count) {
-  uint8_t selected_message = 0;
-  bool found_message = false;
-  for (uint8_t index = 0; index < sizeof(messages) / sizeof(messages[0]); index++) {
-    if (messages[index]->ID == can_id) {
-      selected_message = index;
-      found_message = true;
-      if (can_id == 0x30A && (message_count & 1) != 0) {
-        continue;
+void KiaEGmpBattery::suppress_emulated_id(uint16_t can_id) {
+  // A frame we emulate arrived from the bus: some real node (or the BMS itself)
+  // owns that ID, so stop sending it rather than collide.
+  for (uint16_t i = 0; i < EGMP_TX_TABLE_SIZE; i++) {
+    if (EGMP_TX_TABLE[i].id == can_id) {
+      if (!tx_state[i].suppressed) {
+        tx_state[i].suppressed = true;
+        logging.printf("EGMP: 0x%03X already present on bus, not emulating it\n", can_id);
       }
-      break;
+      return;
     }
   }
+}
 
-  if (can_id == 0x30A && (message_count & 1) != 0) {
-    for (uint8_t index = selected_message + 1; index < sizeof(messages) / sizeof(messages[0]); index++) {
-      if (messages[index]->ID == can_id) {
-        selected_message = index;
-        break;
-      }
+void KiaEGmpBattery::transmit_bus_emulation(unsigned long currentMillis) {
+  if (!tx_schedule_started) {
+    for (uint16_t i = 0; i < EGMP_TX_TABLE_SIZE; i++) {
+      tx_state[i].next_due_ms = currentMillis + EGMP_TX_TABLE[i].offset_ms;
+      tx_state[i].counter = EGMP_TX_TABLE[i].data[2];
+    }
+    tx_schedule_started = true;
+  }
+
+  uint8_t sent = 0;
+  uint16_t index = tx_scan_start;
+  for (uint16_t n = 0; n < EGMP_TX_TABLE_SIZE && sent < MAX_TX_FRAMES_PER_TICK; n++) {
+    index = (tx_scan_start + n) % EGMP_TX_TABLE_SIZE;
+    const EgmpTxFrame& tmpl = EGMP_TX_TABLE[index];
+    TxState& state = tx_state[index];
+    if (state.suppressed || !(enabled_groups & (1UL << tmpl.group))) {
+      continue;
+    }
+    if (static_cast<int32_t>(currentMillis - state.next_due_ms) < 0) {
+      continue;  // not due yet
+    }
+
+    CAN_frame frame = {};
+    frame.FD = !(tmpl.flags & EGMP_TX_CLASSIC);
+    frame.ext_ID = false;
+    frame.DLC = tmpl.dlc;
+    frame.ID = tmpl.id;
+    memcpy(frame.data.u8, tmpl.data, tmpl.dlc);
+    if (tmpl.flags & EGMP_TX_COUNTER) {
+      frame.data.u8[2] = state.counter++;
+    }
+    if (tmpl.flags & EGMP_TX_CRC16) {
+      uint16_t checksum = calculate_transmit_checksum(tmpl.id, frame.data.u8, tmpl.dlc);
+      frame.data.u8[0] = static_cast<uint8_t>(checksum);
+      frame.data.u8[1] = static_cast<uint8_t>(checksum >> 8);
+    }
+    transmit_can_frame(&frame);
+    tx_frames_sent++;
+    sent++;
+
+    state.next_due_ms += tmpl.period_ms;
+    if (static_cast<int32_t>(currentMillis - state.next_due_ms) >= static_cast<int32_t>(tmpl.period_ms)) {
+      // More than a full period behind (main loop stalled): resynchronise
+      // instead of bursting the missed frames, the alive counter must still
+      // advance by exactly one per frame on the wire.
+      state.next_due_ms = currentMillis + tmpl.period_ms;
     }
   }
-
-  if (!found_message) {
-    return;
+  if (sent >= MAX_TX_FRAMES_PER_TICK) {
+    tx_scan_start = (index + 1) % EGMP_TX_TABLE_SIZE;  // be fair to the entries we did not reach
+  } else {
+    tx_scan_start = 0;
   }
-
-  CAN_frame frame = *messages[selected_message];
-  if (has_transmit_counter(frame.ID)) {
-    frame.data.u8[2] = static_cast<uint8_t>(frame.data.u8[2] + message_count);
-  }
-  uint16_t checksum = calculate_transmit_checksum(frame);
-  frame.data.u8[0] = static_cast<uint8_t>(checksum);
-  frame.data.u8[1] = static_cast<uint8_t>(checksum >> 8);
-  transmit_can_frame(&frame);
 }
 
 void KiaEGmpBattery::update_values() {
@@ -298,16 +263,26 @@ String KiaEGmpBattery::get_uds_info_html() {
 
   // clang-format off
   content << "<h4>Cells: " << String(datalayer.battery.info.number_of_cells) << "</h4>"
-              "<h4>SOC (BMS): " << String(SOC_BMS) << "</h4>"
-              "<h4>SOC (Display): " << String(SOC_Display) << "</h4>"
-              "<h4>12V voltage: " << String(leadAcidBatteryVoltage / 10.0f, 1) << "</h4>"
-              "<h4>Waterleakage: " << String(waterleakageSensor)  << "</h4>"
-              "<h4>Temperature, water inlet: " << String(temperature_water_inlet)  << "</h4>"
-              "<h4>Batterymanagement mode: " << String(batteryManagementMode)  << "</h4>"
-              "<h4>Cumulative Charge Energy: " << String(cumulativeChargeEnergy)  << " Wh</h4>"
-              "<h4>Cumulative Discharge Energy: " << String(cumulativeDischargeEnergy)  << " Wh</h4>"
-              "<h4>Operation Time: " << String(opTime)  << " s</h4>"
-              "<h4>BMS ignition: " << String(BMS_ign)  << "</h4>";
+              "<h4>SOC (BMS): " << String(SOC_BMS / 10.0f, 1) << " %</h4>"
+              "<h4>SOC (Display): " << String(SOC_Display / 10.0f, 1) << " %</h4>"
+              "<h4>BMS ignition: " << String(BMS_ign) << (BMS_ign == 0 ? " (BMS does not see the vehicle as switched on)" : "") << "</h4>"
+              "<h4>Batterymanagement mode: " << String(batteryManagementMode) << "</h4>"
+              "<h4>12V voltage: " << String(leadAcidBatteryVoltage / 10.0f, 1) << " V</h4>"
+              "<h4>Waterleakage: " << String(waterleakageSensor) << "</h4>"
+              "<h4>Temperature, water inlet: ";
+  if (temperature_water_inlet == 127) {
+    content << "n/a</h4>";
+  } else {
+    content << String(temperature_water_inlet) << " &deg;C</h4>";
+  }
+  content << "<h4>Cumulative charge current: " << String(cumulative_charge_current_dAh / 10.0) << " Ah</h4>"
+             "<h4>Cumulative discharge current: " << String(cumulative_discharge_current_dAh / 10.0) << " Ah</h4>"
+             "<h4>Total charged energy: " << String(cumulative_charge_energy_hWh / 10.0) << " kWh</h4>"
+             "<h4>Total discharged energy: " << String(cumulative_discharge_energy_hWh / 10.0) << " kWh</h4>"
+             "<h4>Operation Time: " << String(opTime) << " s</h4>"
+             "<h4>Vehicle bus emulation: " << String(EGMP_TX_TABLE_SIZE) << " frame types, " << String(tx_frames_sent)
+          << " frames sent, group mask 0x" << String(enabled_groups, HEX) << "</h4>";
+  // clang-format on
 
   return content;
 }
@@ -376,6 +351,7 @@ void KiaEGmpBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       //Handled in UDS Superclass
       break;
     default:
+      suppress_emulated_id(rx_frame.ID);
       break;
   }
 }
@@ -385,14 +361,14 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
   // the big-endian PID value (up to 4 bytes), `data` points at the raw value
   // bytes (without the SID/DID header). Return 0 to continue the scan list.
   switch (pid) {
-      case POLL_GROUP_1: //59 bytes
+    case POLL_GROUP_1:  //59 bytes
       // Frame 10 (ef fb e7)
       //data[0-2] We are not sure what these are.
 
       // Frame 21 (ef 56 00 00 00 00 00) data3-9
-      SOC_BMS = data[4] * 5; //56
-      allowedChargePower = ((data[5] << 8) + data[6]); //00 00 (apparently not working)
-      allowedDischargePower = ((data[7] << 8) + data[8]); //00 00 (apparently not working)
+      SOC_BMS = data[4] * 5;                               //56
+      allowedChargePower = ((data[5] << 8) + data[6]);     //00 00 (apparently not working)
+      allowedDischargePower = ((data[7] << 8) + data[8]);  //00 00 (apparently not working)
 
       //Frame 22 (00 3c 1a cd 17 16 16) data10-16
       batteryAmps = (data[10] << 8) + data[11];
@@ -400,64 +376,66 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
       temperatureMax = data[14];
       temperatureMin = data[15];
       //temperatureAvg = data[16]; Not required
-      
+
       // Frame 23 (16 15 15 15 00 7f b3) data17-23
       temperature_water_inlet = data[22];
       CellVoltMax_mV = (data[23] * 20);
-    
+
       // Frame 24 (b8 b2 37 00 00 77 00) data24-30
       CellVmaxNo = data[24];
       CellVoltMin_mV = (data[25] * 20);
       CellVminNo = data[26];
       leadAcidBatteryVoltage = data[29];
-      // Frame 25 (01 ec a6 00 01 e9 af) data31-37
-      cumulativeChargeEnergy = data[31] << 16 | data[32] << 8 | data[33];
-      cumulativeDischargeEnergy = data[35] << 16 | data[36] << 8 | data[37];
-
-      //Frame 26 (00 01 74 0f 00 01 66) data38-44
-      cumulativeChargeEnergy2 = data[39] << 16 | data[40] << 8 | data[41];
-      cumulativeDischargeEnergy2 = data[43] << 16 | data[44] << 8 | data[45]; //Flow over
+      // Cumulative counters, big-endian 32-bit, same layout as the Kia/Hyundai 64kWh BMS
+      cumulative_charge_current_dAh =
+          ((uint32_t)data[30] << 24) | ((uint32_t)data[31] << 16) | ((uint32_t)data[32] << 8) | data[33];
+      cumulative_discharge_current_dAh =
+          ((uint32_t)data[34] << 24) | ((uint32_t)data[35] << 16) | ((uint32_t)data[36] << 8) | data[37];
+      cumulative_charge_energy_hWh =
+          ((uint32_t)data[38] << 24) | ((uint32_t)data[39] << 16) | ((uint32_t)data[40] << 8) | data[41];
+      cumulative_discharge_energy_hWh =
+          ((uint32_t)data[42] << 24) | ((uint32_t)data[43] << 16) | ((uint32_t)data[44] << 8) | data[45];
 
       //Frame 27 (a8 01 03 f3 0f 00 02) data45-51
-      opTime = data[46] << 24 | data[47] << 16 | data[48] << 8 | data[49]; 
+      opTime = data[46] << 24 | data[47] << 16 | data[48] << 8 | data[49];
       BMS_ign = data[50];
-      inverterVoltage = ((data[51] << 8) + data[52]); //Flow over
+      inverterVoltage = ((data[51] << 8) + data[52]);  //Flow over
       //Frame 28 (c9 00 00 00 00 0b b8) data52-58
       break;
-case POLL_GROUP_2: //Cellvoltages (Cell 1-32)
-    process_cell_voltage_group(data, 0);
-    break;
-case POLL_GROUP_3: //Cellvoltages (Cell 33-64)
-    process_cell_voltage_group(data, 32);
-    break;
-case POLL_GROUP_4: //Cellvoltages (Cell 65-96)
-    process_cell_voltage_group(data, 64);
-    break;
-case POLL_GROUP_A: //Cellvoltages (Cell 97-128)
-    process_cell_voltage_group(data, 96);
-    break;
-case POLL_GROUP_B: //Cellvoltages (Cell 129-160)
-    process_cell_voltage_group(data, 128);
-    break;
-case POLL_GROUP_C: //Cellvoltages (Cell 161-192)
-    process_cell_voltage_group(data, 160);
-    break;
-case POLL_GROUP_5:
-//Frame 0 (10 2e 62 01 05 ff fb 74) //data0-2
-//Frame21 0f 01 2c 01 01 2c 15 //data3-9
-//Frame22 15 15 15 15 15 15 6c //data10-16
-//Frame23 34 6c 34 00 00 64 1e //data17-23
-heatertemp = data[23];
-//Frame24 00 03 e8 39 38 c6 00 //data24-30
-    batterySOH = (data[25] << 8) | data[26];
-    //amountOfCells = data[29];
-//Frame25 53 00 00 00 00 00 00 //data31-37
-SOC_Display = data[31] * 5;
-//Frame26 00 15 15 15 16 aa aa //data38-44
-break;
-case POLL_GROUP_6:
-batteryManagementMode = data[14];
-break;
+    case POLL_GROUP_2:  //Cellvoltages (Cell 1-32)
+      process_cell_voltage_group(data, 0);
+      break;
+    case POLL_GROUP_3:  //Cellvoltages (Cell 33-64)
+      process_cell_voltage_group(data, 32);
+      break;
+    case POLL_GROUP_4:  //Cellvoltages (Cell 65-96)
+      process_cell_voltage_group(data, 64);
+      break;
+    case POLL_GROUP_A:  //Cellvoltages (Cell 97-128)
+      process_cell_voltage_group(data, 96);
+      break;
+    case POLL_GROUP_B:  //Cellvoltages (Cell 129-160)
+      process_cell_voltage_group(data, 128);
+      break;
+    case POLL_GROUP_C:  //Cellvoltages (Cell 161-192)
+      process_cell_voltage_group(data, 160);
+      break;
+    case POLL_GROUP_5:
+      //Frame 0 (10 2e 62 01 05 ff fb 74) //data0-2
+      //Frame21 0f 01 2c 01 01 2c 15 //data3-9
+      //Frame22 15 15 15 15 15 15 6c //data10-16
+      //Frame23 34 6c 34 00 00 64 1e //data17-23
+      heatertemp = data[23];
+      //Frame24 00 03 e8 39 38 c6 00 //data24-30
+      batterySOH = (data[25] << 8) | data[26];
+      //amountOfCells = data[29];
+      //Frame25 53 00 00 00 00 00 00 //data31-37
+      SOC_Display = data[31] * 5;
+      //Frame26 00 15 15 15 16 aa aa //data38-44
+      break;
+    case POLL_GROUP_6:
+      batteryManagementMode = data[14];
+      break;
     default:  //Unknown pid
       break;
   }
@@ -465,69 +443,12 @@ break;
 }
 
 void KiaEGmpBattery::transmit_can(unsigned long currentMillis) {
-  if (startedUp) {
-    if (startupSequenceRequested || (!startupSequenceComplete && !startupSequenceActive)) {
-      startupSequenceRequested = false;
-      startupSequenceActive = true;
-      startupMessageIndex = 0;
-      startupStartMillis = currentMillis;
-      transmitScheduleStarted = false;
-      transmit10msCount = 0;
-    }
-
-    if (startupSequenceActive) {
-      while (startupMessageIndex < sizeof(messages) / sizeof(messages[0]) &&
-             currentMillis - startupStartMillis >= startupMessageDelays[startupMessageIndex]) {
-        transmit_startup_message(startupMessageIndex);
-        startupMessageIndex++;
-      }
-
-      if (startupMessageIndex >= sizeof(messages) / sizeof(messages[0])) {
-        startupSequenceActive = false;
-        startupSequenceComplete = true;
-        lastTransmitMillis = currentMillis;
-        transmitScheduleStarted = true;
-      }
-    }
-
-    if (!startupSequenceActive) {
-    if (!transmitScheduleStarted) {
-      lastTransmitMillis = currentMillis;
-      transmitScheduleStarted = true;
-    }
-
-    while (currentMillis - lastTransmitMillis >= 10) {
-      lastTransmitMillis += 10;
-      transmit_message(0x10A, transmit10msCount);
-      transmit_message(0x120, transmit10msCount);
-      transmit_message(0x19A, transmit10msCount);
-
-      if ((transmit10msCount % 10) == 0) {
-        transmit_message(0x2B5, transmit10msCount / 10);
-        transmit_message(0x2E0, transmit10msCount / 10);
-        transmit_message(0x33A, transmit10msCount / 10);
-        transmit_message(0x350, transmit10msCount / 10);
-        transmit_message(0x2E5, transmit10msCount / 10);
-        transmit_message(0x30A, transmit10msCount / 10);
-        transmit_message(0x320, transmit10msCount / 10);
-      }
-
-      if ((transmit10msCount % 20) == 0) {
-        transmit_message(0x2C0, transmit10msCount / 20);
-        transmit_message(0x2D5, transmit10msCount / 20);
-        transmit_message(0x2EA, transmit10msCount / 20);
-        transmit_message(0x306, transmit10msCount / 20);
-        transmit_message(0x308, transmit10msCount / 20);
-        transmit_message(0x3B5, transmit10msCount / 20);
-      }
-
-      transmit10msCount++;
-    }
-    }
-
-    // UDS PID polling and DTC handling
-    transmit_uds_can(currentMillis);
+  if (!startedUp) {
+    return;  // Wait for the BMS to talk before we start emulating the vehicle
   }
+  transmit_bus_emulation(currentMillis);
+  // UDS PID polling and DTC handling
+  transmit_uds_can(currentMillis);
 }
 
 void KiaEGmpBattery::setup(void) {  // Performs one time setup at startup
@@ -540,20 +461,11 @@ void KiaEGmpBattery::setup(void) {  // Performs one time setup at startup
   datalayer.battery.info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_MV;
   datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_MV;
   datalayer.battery.info.max_cell_voltage_deviation_mV = MAX_CELL_DEVIATION_MV;
-    // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC. Also passing true to isFD
+  // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC. Also passing true to isFD
   setup_uds(0x7E4, 0x7EC, true);
   static const uint16_t pid_scan_list[] = {
-      POLL_GROUP_1,
-      POLL_GROUP_2,
-      POLL_GROUP_3,
-      POLL_GROUP_4,
-      POLL_GROUP_5,
-      POLL_GROUP_6,
-      POLL_GROUP_7,
-      POLL_GROUP_8,
-      POLL_GROUP_A,
-      POLL_GROUP_B,
-      POLL_GROUP_C,
+      POLL_GROUP_1, POLL_GROUP_2, POLL_GROUP_3, POLL_GROUP_4, POLL_GROUP_5, POLL_GROUP_6,
+      POLL_GROUP_7, POLL_GROUP_8, POLL_GROUP_A, POLL_GROUP_B, POLL_GROUP_C,
   };
   set_pid_scan_list(pid_scan_list, sizeof(pid_scan_list) / sizeof(pid_scan_list[0]));
 }
