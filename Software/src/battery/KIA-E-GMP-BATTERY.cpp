@@ -166,7 +166,7 @@ inline String& operator<<(String& str, const T& value) {
 }
 String KiaEGmpBattery::get_uds_info_html() {
   String content;
-  content.reserve(1600);
+  content.reserve(3000);
 
   // clang-format off
   content << "<h4>Cells: " << String(datalayer.battery.info.number_of_cells) << "</h4>"
@@ -186,9 +186,39 @@ String KiaEGmpBattery::get_uds_info_html() {
   }
   content << ")</h4>"
              "<h4>Inverter-side voltage: " << String(inverterVoltage / 10.0f, 1) << " V (max since boot " << String(inverterVoltage_max / 10.0f, 1) << " V, pack " << String(batteryVoltage / 10.0f, 1) << " V)</h4>"
+             "<h4>Relay status and inverter voltage use the Kia/Hyundai 64kWh byte positions, not yet confirmed on E-GMP</h4>"
+             "<h4>PID 0101 replies: " << String(pid101_replies) << ", length " << String(pid101_len) << "</h4>"
+             "<h4>PID 0101 raw (byte index: value):</h4>";
+  // clang-format on
+  for (uint16_t i = 0; i < pid101_len; i++) {
+    if (i % 8 == 0) {
+      content << "<h4 style='font-family:monospace'>" << String(i) << ":";
+    }
+    content << " " << (pid101_raw[i] < 0x10 ? "0" : "") << String(pid101_raw[i], HEX);
+    if (i % 8 == 7 || i == pid101_len - 1) {
+      content << "</h4>";
+    }
+  }
+  content << "<h4>PID 0101 bytes that changed since boot (index: changes, seconds since last change):</h4><h4 "
+             "style='font-family:monospace'>";
+  bool any_change = false;
+  for (uint16_t i = 0; i < pid101_len; i++) {
+    if (pid101_change_count[i] > 0) {
+      any_change = true;
+      content << " " << String(i) << ":" << String(pid101_change_count[i]) << ","
+              << String((millis() - pid101_last_change_ms[i]) / 1000);
+    }
+  }
+  if (!any_change) {
+    content << " none";
+  }
+  content << "</h4>";
+  // clang-format off
+  content <<
               "<h4>Vehicle emulation groups (EGMPGROUPS bitmask): " << String(user_selected_egmp_frame_groups) << " (0x" << String(user_selected_egmp_frame_groups, HEX) << ")</h4>"
               "<h4>Emulated vehicle frames: " << String(EGMP_TX_TABLE_SIZE) << " frame types, " << String(emulated_frames_per_second) << " frames/s, " << String(tx_frames_sent) << " sent</h4>"
               "<h4>CAN-FD send failures: " << String(datalayer.system.info.can_2518_send_fail ? "yes" : "no") << "</h4>";
+  // clang-format on
 
   return content;
 }
@@ -267,14 +297,15 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
   // the big-endian PID value (up to 4 bytes), `data` points at the raw value
   // bytes (without the SID/DID header). Return 0 to continue the scan list.
   switch (pid) {
-      case POLL_GROUP_1: //59 bytes
+    case POLL_GROUP_1:  //59 bytes
+      track_pid101(data, length);
       // Frame 10 (ef fb e7)
       //data[0-2] We are not sure what these are.
 
       // Frame 21 (ef 56 00 00 00 00 00) data3-9
-      SOC_BMS = data[4] * 5; //56
-      allowedChargePower = ((data[5] << 8) + data[6]); //00 00 (apparently not working)
-      allowedDischargePower = ((data[7] << 8) + data[8]); //00 00 (apparently not working)
+      SOC_BMS = data[4] * 5;                               //56
+      allowedChargePower = ((data[5] << 8) + data[6]);     //00 00 (apparently not working)
+      allowedDischargePower = ((data[7] << 8) + data[8]);  //00 00 (apparently not working)
       batteryRelay = data[9];  // Relay status bits, same byte the Kia/Hyundai 64kWh BMS reports
       if (batteryRelay != batteryRelay_previous) {
         batteryRelay_last_change_ms = millis();
@@ -290,11 +321,11 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
       temperatureMax = data[14];
       temperatureMin = data[15];
       //temperatureAvg = data[16]; Not required
-      
+
       // Frame 23 (16 15 15 15 00 7f b3) data17-23
       temperature_water_inlet = data[22];
       CellVoltMax_mV = (data[23] * 20);
-    
+
       // Frame 24 (b8 b2 37 00 00 77 00) data24-30
       CellVmaxNo = data[24];
       CellVoltMin_mV = (data[25] * 20);
@@ -306,55 +337,76 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
 
       //Frame 26 (00 01 74 0f 00 01 66) data38-44
       cumulativeChargeEnergy2 = data[39] << 16 | data[40] << 8 | data[41];
-      cumulativeDischargeEnergy2 = data[43] << 16 | data[44] << 8 | data[45]; //Flow over
+      cumulativeDischargeEnergy2 = data[43] << 16 | data[44] << 8 | data[45];  //Flow over
 
       //Frame 27 (a8 01 03 f3 0f 00 02) data45-51
-      opTime = data[46] << 24 | data[47] << 16 | data[48] << 8 | data[49]; 
+      opTime = data[46] << 24 | data[47] << 16 | data[48] << 8 | data[49];
       BMS_ign = data[50];
-      inverterVoltage = ((data[51] << 8) + data[52]); //Flow over
+      inverterVoltage = ((data[51] << 8) + data[52]);  //Flow over
       if (inverterVoltage > inverterVoltage_max && inverterVoltage < 10000) {
         inverterVoltage_max = inverterVoltage;
       }
       //Frame 28 (c9 00 00 00 00 0b b8) data52-58
       break;
-case POLL_GROUP_2: //Cellvoltages (Cell 1-32)
-    process_cell_voltage_group(data, 0);
-    break;
-case POLL_GROUP_3: //Cellvoltages (Cell 33-64)
-    process_cell_voltage_group(data, 32);
-    break;
-case POLL_GROUP_4: //Cellvoltages (Cell 65-96)
-    process_cell_voltage_group(data, 64);
-    break;
-case POLL_GROUP_A: //Cellvoltages (Cell 97-128)
-    process_cell_voltage_group(data, 96);
-    break;
-case POLL_GROUP_B: //Cellvoltages (Cell 129-160)
-    process_cell_voltage_group(data, 128);
-    break;
-case POLL_GROUP_C: //Cellvoltages (Cell 161-192)
-    process_cell_voltage_group(data, 160);
-    break;
-case POLL_GROUP_5:
-//Frame 0 (10 2e 62 01 05 ff fb 74) //data0-2
-//Frame21 0f 01 2c 01 01 2c 15 //data3-9
-//Frame22 15 15 15 15 15 15 6c //data10-16
-//Frame23 34 6c 34 00 00 64 1e //data17-23
-heatertemp = data[23];
-//Frame24 00 03 e8 39 38 c6 00 //data24-30
-    batterySOH = (data[25] << 8) | data[26];
-    //amountOfCells = data[29];
-//Frame25 53 00 00 00 00 00 00 //data31-37
-SOC_Display = data[31] * 5;
-//Frame26 00 15 15 15 16 aa aa //data38-44
-break;
-case POLL_GROUP_6:
-batteryManagementMode = data[14];
-break;
+    case POLL_GROUP_2:  //Cellvoltages (Cell 1-32)
+      process_cell_voltage_group(data, 0);
+      break;
+    case POLL_GROUP_3:  //Cellvoltages (Cell 33-64)
+      process_cell_voltage_group(data, 32);
+      break;
+    case POLL_GROUP_4:  //Cellvoltages (Cell 65-96)
+      process_cell_voltage_group(data, 64);
+      break;
+    case POLL_GROUP_A:  //Cellvoltages (Cell 97-128)
+      process_cell_voltage_group(data, 96);
+      break;
+    case POLL_GROUP_B:  //Cellvoltages (Cell 129-160)
+      process_cell_voltage_group(data, 128);
+      break;
+    case POLL_GROUP_C:  //Cellvoltages (Cell 161-192)
+      process_cell_voltage_group(data, 160);
+      break;
+    case POLL_GROUP_5:
+      //Frame 0 (10 2e 62 01 05 ff fb 74) //data0-2
+      //Frame21 0f 01 2c 01 01 2c 15 //data3-9
+      //Frame22 15 15 15 15 15 15 6c //data10-16
+      //Frame23 34 6c 34 00 00 64 1e //data17-23
+      heatertemp = data[23];
+      //Frame24 00 03 e8 39 38 c6 00 //data24-30
+      batterySOH = (data[25] << 8) | data[26];
+      //amountOfCells = data[29];
+      //Frame25 53 00 00 00 00 00 00 //data31-37
+      SOC_Display = data[31] * 5;
+      //Frame26 00 15 15 15 16 aa aa //data38-44
+      break;
+    case POLL_GROUP_6:
+      batteryManagementMode = data[14];
+      break;
     default:  //Unknown pid
       break;
   }
   return 0;  //Continue scanning the PID list in order
+}
+
+void KiaEGmpBattery::track_pid101(const uint8_t* data, uint16_t length) {
+  // Remember the raw reply and count per-byte changes. Bytes that are expected to move all the
+  // time (current, pack voltage, cumulative counters, operation time) are tracked but not logged.
+  if (length > PID101_MAX_LEN) {
+    length = PID101_MAX_LEN;
+  }
+  pid101_replies++;
+  for (uint16_t i = 0; i < length; i++) {
+    if (pid101_replies > 1 && data[i] != pid101_raw[i]) {
+      pid101_change_count[i]++;
+      pid101_last_change_ms[i] = millis();
+      bool noisy = (i >= 10 && i <= 13) || (i >= 30 && i <= 49);
+      if (!noisy) {
+        logging.printf("EGMP: PID 0101 byte %u: 0x%02X -> 0x%02X\n", i, pid101_raw[i], data[i]);
+      }
+    }
+    pid101_raw[i] = data[i];
+  }
+  pid101_len = length;
 }
 
 void KiaEGmpBattery::transmit_can(unsigned long currentMillis) {
@@ -454,7 +506,7 @@ void KiaEGmpBattery::setup(void) {  // Performs one time setup at startup
   datalayer.battery.info.max_cell_voltage_mV = MAX_CELL_VOLTAGE_MV;
   datalayer.battery.info.min_cell_voltage_mV = MIN_CELL_VOLTAGE_MV;
   datalayer.battery.info.max_cell_voltage_deviation_mV = MAX_CELL_DEVIATION_MV;
-    // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC. Also passing true to isFD
+  // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC. Also passing true to isFD
   setup_uds(0x7E4, 0x7EC, true);
   // Group 1 (relay status, inverter-side voltage, ignition) is interleaved so it is
   // read every other poll (~200 ms) and a one-second contactor event is not missed.

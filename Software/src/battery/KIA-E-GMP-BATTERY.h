@@ -84,6 +84,16 @@ class KiaEGmpBattery : public UdsCanBattery {
   unsigned long batteryRelay_last_change_ms = 0;
   uint8_t batteryRelay_changes = 0;
   uint16_t inverterVoltage_max = 0;  // highest inverter-side voltage seen since boot (0.1 V)
+
+  // Raw PID 0x0101 reply, kept to find out which bytes move when the BMS closes/opens its relays.
+  // The Kia/Hyundai 64kWh layout (relay byte, inverter voltage) did not match on E-GMP.
+  static const uint8_t PID101_MAX_LEN = 64;
+  uint8_t pid101_raw[PID101_MAX_LEN] = {};
+  uint16_t pid101_len = 0;
+  uint32_t pid101_replies = 0;
+  uint16_t pid101_change_count[PID101_MAX_LEN] = {};
+  unsigned long pid101_last_change_ms[PID101_MAX_LEN] = {};
+  void track_pid101(const uint8_t* data, uint16_t length);
   uint8_t waterleakageSensor = 164;
   bool startedUp = false;
   int8_t temperature_water_inlet = 20;
