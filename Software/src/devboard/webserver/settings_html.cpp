@@ -541,7 +541,7 @@ String raw_settings_processor(const String& var, BatteryEmulatorSettingsStore& s
   }
 
   if (var == "EGMPGROUPS") {
-    return String(settings.getUInt("EGMPGROUPS", 7));
+    return String(settings.getUInt("EGMPGROUPS", 4095));
   }
 
   if (var == "CNTCTRL") {
@@ -1901,8 +1901,8 @@ const char* getCANInterfaceName(CAN_Interface interface) {
         <div class="if-egmp">
         <label>E-GMP vehicle emulation groups: </label>
         <input type='number' name='EGMPGROUPS' value="%EGMPGROUPS%" 
-        min="0" max="63" step="1"
-        title="Bitmask of emulated vehicle CAN frame groups sent to the BMS. 1=VCU/MCU core (contactor closing), 2=ICCU candidates (DTC U111800), 4=compressor/coolant valve candidates (DTC U111900/U112800), 8=extra VCU/MCU, 16=chassis 10ms frames (high bus load), 32=VIN broadcast. Default 7 (core+ICCU+thermal). Takes effect after reboot." />
+        min="0" max="4095" step="1"
+        title="Bitmask of emulated vehicle CAN frame groups sent to the BMS. 1=VCU/MCU core (contactor closing), 2=ICCU/charger candidates (DTC U111800), 4=compressor/coolant valve candidates (DTC U111900/U112800), 8=extra VCU/MCU, 16=chassis 10ms frames (high bus load), 32=VIN broadcast, 64=remaining 20ms frames, 128=remaining 50ms frames, 256=1s CAN-FD frames, 512=200ms 8-byte frames, 1024=static 0x4xx frames, 2048=classic CAN frames. Default 4095 (everything from the car log, the best known result). Clear bits to find out what the BMS really needs. Takes effect after reboot." />
         </div>
 
         <div class="if-chgestimated">

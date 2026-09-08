@@ -179,9 +179,9 @@ String KiaEGmpBattery::get_uds_info_html() {
               "<h4>Cumulative Charge Energy: " << String(cumulativeChargeEnergy)  << " Wh</h4>"
               "<h4>Cumulative Discharge Energy: " << String(cumulativeDischargeEnergy)  << " Wh</h4>"
               "<h4>Operation Time: " << String(opTime)  << " s</h4>"
-              "<h4>BMS ignition: " << String(BMS_ign)  << "</h4>"
-              "<h4>Vehicle emulation groups (EGMPGROUPS bitmask): " << String(user_selected_egmp_frame_groups) << "</h4>"
-              "<h4>Emulated vehicle frames/s: " << String(emulated_frames_per_second) << "</h4>"
+              "<h4>BMS ignition: " << String(BMS_ign) << (BMS_ign == 0 ? " (BMS does not see the vehicle as switched on)" : "") << "</h4>"
+              "<h4>Vehicle emulation groups (EGMPGROUPS bitmask): " << String(user_selected_egmp_frame_groups) << " (0x" << String(user_selected_egmp_frame_groups, HEX) << ")</h4>"
+              "<h4>Emulated vehicle frames: " << String(EGMP_TX_TABLE_SIZE) << " frame types, " << String(emulated_frames_per_second) << " frames/s, " << String(tx_frames_sent) << " sent</h4>"
               "<h4>CAN-FD send failures: " << String(datalayer.system.info.can_2518_send_fail ? "yes" : "no") << "</h4>";
 
   return content;
@@ -251,6 +251,7 @@ void KiaEGmpBattery::handle_incoming_can_frame(CAN_frame rx_frame) {
       //Handled in UDS Superclass
       break;
     default:
+      suppress_emulated_id(rx_frame.ID);
       break;
   }
 }
@@ -349,33 +350,73 @@ void KiaEGmpBattery::transmit_can(unsigned long currentMillis) {
   }
 }
 
-void KiaEGmpBattery::transmit_emulated_frames(unsigned long currentMillis) {
-  uint8_t sent_this_tick = 0;
-
-  for (auto& emulated : emulated_frames) {
-    if (!(user_selected_egmp_frame_groups & (1 << emulated.group))) {
-      continue;  // Group disabled by the user
+void KiaEGmpBattery::suppress_emulated_id(uint16_t can_id) {
+  // A frame we emulate arrived from the bus: some real node (or the BMS itself)
+  // owns that ID, so stop sending it rather than collide.
+  for (uint16_t i = 0; i < EGMP_TX_TABLE_SIZE; i++) {
+    if (EGMP_TX_TABLE[i].id == can_id) {
+      if (!tx_state[i].suppressed) {
+        tx_state[i].suppressed = true;
+        logging.printf("EGMP: 0x%03X already present on bus, not emulating it\n", can_id);
+      }
+      return;
     }
-    if (currentMillis - emulated.last_tx_ms < emulated.period_ms) {
+  }
+}
+
+void KiaEGmpBattery::transmit_emulated_frames(unsigned long currentMillis) {
+  if (!tx_schedule_started) {
+    // Stagger the first transmissions so no millisecond carries a burst of frames
+    for (uint16_t i = 0; i < EGMP_TX_TABLE_SIZE; i++) {
+      tx_state[i].next_due_ms = currentMillis + EGMP_TX_TABLE[i].offset_ms;
+      tx_state[i].counter = EGMP_TX_TABLE[i].data[2];
+    }
+    tx_schedule_started = true;
+  }
+
+  uint8_t sent = 0;
+  uint16_t index = tx_scan_start;
+  for (uint16_t n = 0; n < EGMP_TX_TABLE_SIZE && sent < MAX_TX_FRAMES_PER_TICK; n++) {
+    index = (tx_scan_start + n) % EGMP_TX_TABLE_SIZE;
+    const EgmpTxFrame& tmpl = EGMP_TX_TABLE[index];
+    TxState& state = tx_state[index];
+    if (state.suppressed || !(user_selected_egmp_frame_groups & (1u << tmpl.group))) {
+      continue;  // Another node sends this ID, or the group is disabled by the user
+    }
+    if (static_cast<int32_t>(currentMillis - state.next_due_ms) < 0) {
       continue;  // Not due yet
     }
-    if (sent_this_tick >= MAX_FRAMES_PER_TICK) {
-      break;  // Spread the burst over the next loop iterations, the remaining frames stay due
-    }
-    emulated.last_tx_ms = currentMillis;
 
-    if (emulated.has_crc) {
-      // Byte 2 is an 8-bit alive counter, bytes 0-1 hold the CRC16 over the rest of the frame + CAN ID
-      emulated.counter++;
-      emulated.frame.data.u8[2] = emulated.counter;
-      uint16_t crc = crc16_hyundai_canfd(emulated.frame.data.u8, emulated.frame.DLC, emulated.frame.ID);
-      emulated.frame.data.u8[0] = crc & 0xFF;
-      emulated.frame.data.u8[1] = crc >> 8;
+    CAN_frame frame = {};
+    frame.FD = !(tmpl.flags & EGMP_TX_CLASSIC);
+    frame.ext_ID = false;
+    frame.DLC = tmpl.dlc;
+    frame.ID = tmpl.id;
+    memcpy(frame.data.u8, tmpl.data, tmpl.dlc);
+    if (tmpl.flags & EGMP_TX_COUNTER) {
+      frame.data.u8[2] = state.counter++;  // 8-bit alive counter, +1 per frame on the wire
     }
-
-    transmit_can_frame(&emulated.frame);
-    sent_this_tick++;
+    if (tmpl.flags & EGMP_TX_CRC16) {
+      uint16_t crc = crc16_hyundai_canfd(frame.data.u8, tmpl.dlc, tmpl.id, tmpl.crc_xor);
+      frame.data.u8[0] = static_cast<uint8_t>(crc & 0xFF);
+      frame.data.u8[1] = static_cast<uint8_t>(crc >> 8);
+    }
+    transmit_can_frame(&frame);
+    tx_frames_sent++;
     emulated_frames_sent_in_window++;
+    sent++;
+
+    state.next_due_ms += tmpl.period_ms;
+    if (static_cast<int32_t>(currentMillis - state.next_due_ms) >= static_cast<int32_t>(tmpl.period_ms)) {
+      // More than a full period behind (main loop stalled): resynchronise instead of bursting
+      // the missed frames, the alive counter must still advance by exactly one per frame.
+      state.next_due_ms = currentMillis + tmpl.period_ms;
+    }
+  }
+  if (sent >= MAX_TX_FRAMES_PER_TICK) {
+    tx_scan_start = (index + 1) % EGMP_TX_TABLE_SIZE;  // Be fair to the entries we did not reach
+  } else {
+    tx_scan_start = 0;
   }
 
   // Frames per second statistic for the advanced battery page
