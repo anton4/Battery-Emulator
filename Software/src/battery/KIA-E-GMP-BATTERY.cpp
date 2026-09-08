@@ -180,6 +180,12 @@ String KiaEGmpBattery::get_uds_info_html() {
               "<h4>Cumulative Discharge Energy: " << String(cumulativeDischargeEnergy)  << " Wh</h4>"
               "<h4>Operation Time: " << String(opTime)  << " s</h4>"
               "<h4>BMS ignition: " << String(BMS_ign) << (BMS_ign == 0 ? " (BMS does not see the vehicle as switched on)" : "") << "</h4>"
+              "<h4>BMS relay status: 0x" << String(batteryRelay, HEX) << " (" << String(batteryRelay_changes) << " changes";
+  if (batteryRelay_changes > 0) {
+    content << ", last " << String((millis() - batteryRelay_last_change_ms) / 1000) << " s ago";
+  }
+  content << ")</h4>"
+             "<h4>Inverter-side voltage: " << String(inverterVoltage / 10.0f, 1) << " V (max since boot " << String(inverterVoltage_max / 10.0f, 1) << " V, pack " << String(batteryVoltage / 10.0f, 1) << " V)</h4>"
               "<h4>Vehicle emulation groups (EGMPGROUPS bitmask): " << String(user_selected_egmp_frame_groups) << " (0x" << String(user_selected_egmp_frame_groups, HEX) << ")</h4>"
               "<h4>Emulated vehicle frames: " << String(EGMP_TX_TABLE_SIZE) << " frame types, " << String(emulated_frames_per_second) << " frames/s, " << String(tx_frames_sent) << " sent</h4>"
               "<h4>CAN-FD send failures: " << String(datalayer.system.info.can_2518_send_fail ? "yes" : "no") << "</h4>";
@@ -269,6 +275,14 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
       SOC_BMS = data[4] * 5; //56
       allowedChargePower = ((data[5] << 8) + data[6]); //00 00 (apparently not working)
       allowedDischargePower = ((data[7] << 8) + data[8]); //00 00 (apparently not working)
+      batteryRelay = data[9];  // Relay status bits, same byte the Kia/Hyundai 64kWh BMS reports
+      if (batteryRelay != batteryRelay_previous) {
+        batteryRelay_last_change_ms = millis();
+        batteryRelay_changes++;
+        logging.printf("EGMP: BMS relay status 0x%02X -> 0x%02X, inverter side %u.%u V\n", batteryRelay_previous,
+                       batteryRelay, inverterVoltage / 10, inverterVoltage % 10);
+        batteryRelay_previous = batteryRelay;
+      }
 
       //Frame 22 (00 3c 1a cd 17 16 16) data10-16
       batteryAmps = (data[10] << 8) + data[11];
@@ -298,6 +312,9 @@ uint16_t KiaEGmpBattery::handle_pid(uint16_t pid, uint32_t value, const uint8_t*
       opTime = data[46] << 24 | data[47] << 16 | data[48] << 8 | data[49]; 
       BMS_ign = data[50];
       inverterVoltage = ((data[51] << 8) + data[52]); //Flow over
+      if (inverterVoltage > inverterVoltage_max && inverterVoltage < 10000) {
+        inverterVoltage_max = inverterVoltage;
+      }
       //Frame 28 (c9 00 00 00 00 0b b8) data52-58
       break;
 case POLL_GROUP_2: //Cellvoltages (Cell 1-32)
@@ -439,18 +456,12 @@ void KiaEGmpBattery::setup(void) {  // Performs one time setup at startup
   datalayer.battery.info.max_cell_voltage_deviation_mV = MAX_CELL_DEVIATION_MV;
     // UDS: send requests to 0x7E4, accept replies from the BMS on 0x7EC. Also passing true to isFD
   setup_uds(0x7E4, 0x7EC, true);
+  // Group 1 (relay status, inverter-side voltage, ignition) is interleaved so it is
+  // read every other poll (~200 ms) and a one-second contactor event is not missed.
   static const uint16_t pid_scan_list[] = {
-      POLL_GROUP_1,
-      POLL_GROUP_2,
-      POLL_GROUP_3,
-      POLL_GROUP_4,
-      POLL_GROUP_5,
-      POLL_GROUP_6,
-      POLL_GROUP_7,
-      POLL_GROUP_8,
-      POLL_GROUP_A,
-      POLL_GROUP_B,
-      POLL_GROUP_C,
+      POLL_GROUP_1, POLL_GROUP_2, POLL_GROUP_1, POLL_GROUP_3, POLL_GROUP_1, POLL_GROUP_4, POLL_GROUP_1,
+      POLL_GROUP_5, POLL_GROUP_1, POLL_GROUP_6, POLL_GROUP_1, POLL_GROUP_7, POLL_GROUP_1, POLL_GROUP_8,
+      POLL_GROUP_1, POLL_GROUP_A, POLL_GROUP_1, POLL_GROUP_B, POLL_GROUP_1, POLL_GROUP_C,
   };
   set_pid_scan_list(pid_scan_list, sizeof(pid_scan_list) / sizeof(pid_scan_list[0]));
 }
