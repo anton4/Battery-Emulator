@@ -79,7 +79,7 @@ class KiaEGmpBattery : public UdsCanBattery {
   uint8_t CellVminNo = 0;
   uint8_t batteryManagementMode = 0;
   uint8_t BMS_ign = 0xff;
-  uint8_t batteryRelay = 0;                  // PID 0x0101 relay status byte, changes when the BMS closes/opens
+  uint8_t batteryRelay = 0;  // PID 0x0101 relay status byte, changes when the BMS closes/opens
   uint8_t batteryRelay_previous = 0;
   unsigned long batteryRelay_last_change_ms = 0;
   uint8_t batteryRelay_changes = 0;
